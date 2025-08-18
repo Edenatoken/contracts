@@ -396,18 +396,18 @@ contract LockToken is
     }
 
     // Lock related functions
-    function lock(
-        address holder,
-        uint256 value,
-        uint256 releaseTime
-    ) public onlyApproved nonReentrant returns (bool) {
-        require(holder != address(0), "Cannot lock zero address");
-        require(value > 0, "Lock amount must be greater than 0");
-        require(releaseTime > block.timestamp, "Release time must be in the future");
-        require(balanceOf(holder) >= value, "There is not enough balances of holder.");
-        _lock(holder, value, releaseTime);
-        return true;
-    }
+    // function lock(
+    //     address holder,
+    //     uint256 value,
+    //     uint256 releaseTime
+    // ) public onlyApproved nonReentrant returns (bool) {
+    //     require(holder != address(0), "Cannot lock zero address");
+    //     require(value > 0, "Lock amount must be greater than 0");
+    //     require(releaseTime > block.timestamp, "Release time must be in the future");
+    //     require(balanceOf(holder) >= value, "There is not enough balances of holder.");
+    //     _lock(holder, value, releaseTime);
+    //     return true;
+    // }
 
     function transferWithLock(
         address holder,
@@ -528,34 +528,34 @@ contract LockToken is
     }
 
     // Function to manually add specific address to snapshot
-    function addAddressToSnapshot(address _address, uint256 snapshotId) public onlyOwner {
-        require(_address != address(0), "Cannot add zero address");
-        require(snapshotId <= currentSnapshotId, "Snapshot does not exist");
+    // function addAddressToSnapshot(address _address, uint256 snapshotId) public onlyOwner {
+    //     require(_address != address(0), "Cannot add zero address");
+    //     require(snapshotId <= currentSnapshotId, "Snapshot does not exist");
         
-        uint256 balance = balanceOf(_address);
+    //     uint256 balance = balanceOf(_address);
         
-        if (balance > 0) {
-            snapshotBalances[snapshotId][_address] = balance;
-            snapshotAddresses[snapshotId].push(_address);
-        }
-    }
+    //     if (balance > 0) {
+    //         snapshotBalances[snapshotId][_address] = balance;
+    //         snapshotAddresses[snapshotId].push(_address);
+    //     }
+    // }
 
     // Function to add multiple addresses to snapshot at once
-    function addAddressesToSnapshot(address[] memory _addresses, uint256 snapshotId) public onlyOwner {
-        require(snapshotId <= currentSnapshotId, "Snapshot does not exist");
+    // function addAddressesToSnapshot(address[] memory _addresses, uint256 snapshotId) public onlyOwner {
+    //     require(snapshotId <= currentSnapshotId, "Snapshot does not exist");
         
-        for (uint256 i = 0; i < _addresses.length; i++) {
-            address addr = _addresses[i];
-            if (addr != address(0)) {
-                uint256 balance = balanceOf(addr);
+    //     for (uint256 i = 0; i < _addresses.length; i++) {
+    //         address addr = _addresses[i];
+    //         if (addr != address(0)) {
+    //             uint256 balance = balanceOf(addr);
                 
-                if (balance > 0) {
-                    snapshotBalances[snapshotId][addr] = balance;
-                    snapshotAddresses[snapshotId].push(addr);
-                }
-            }
-        }
-    }
+    //             if (balance > 0) {
+    //                 snapshotBalances[snapshotId][addr] = balance;
+    //                 snapshotAddresses[snapshotId].push(addr);
+    //             }
+    //         }
+    //     }
+    // }
 
     // Query address balance at specific snapshot (including locked quantity)
     function balanceOfAt(address account, uint256 snapshotId) public view returns (uint256) {
