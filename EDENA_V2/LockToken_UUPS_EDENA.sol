@@ -39,19 +39,25 @@ contract Approvable is Initializable, OwnableUpgradeable {
         require(_approveAddress != address(0), "Invalid address");
         require(!isApproved(_approveAddress), "Already approved");
         approveArr.push(_approveAddress);
+        emit ApproveAdded(msg.sender, _approveAddress);
     }
 
     function removeApproveArr(address _approveAddress) public onlyOwner {
         require(_approveAddress != address(0), "Invalid address");
         uint256 arrCnt = approveArr.length;
+        bool found = false;
         for (uint256 i = 0; i < arrCnt; i++) {
             if (approveArr[i] == _approveAddress) {
                 // move last element to current position
                 approveArr[i] = approveArr[arrCnt - 1];
                 // decrease array length
                 approveArr.pop();
+                found = true;
                 break;
             }
+        }
+        if (found) {
+            emit ApproveRemoved(msg.sender, _approveAddress);
         }
     }
 
@@ -104,16 +110,29 @@ contract LockToken is
     // Mapping for managing locked token amounts
     mapping(address => uint256) public lockedAmount;
 
-    // Snapshot related variables
+    // Snapshot related variables - using OpenZeppelin pattern
     mapping(uint256 => uint256) public snapshotTotalSupply;
     mapping(uint256 => uint256) public snapshotTimestamp;
-    mapping(uint256 => mapping(address => uint256)) public snapshotBalances;
+    mapping(address => mapping(uint256 => uint256)) private _accountBalanceSnapshots;
+    mapping(uint256 => uint256) private _totalSupplySnapshots;
+    mapping(address => uint256[]) private _snapshotIds;
+    uint256[] private _allSnapshotIds;
     uint256 public currentSnapshotId;
 
     // Address management
     address[] public addressList;
     mapping(address => bool) public isAddressRegistered;
-    mapping(uint256 => address[]) public snapshotAddresses;
+    
+    // Limit the maximum number of active locks per address
+    uint256 public constant MAX_LOCKS_PER_ADDRESS = 100;
+    
+    // Anti-frontrunning protection
+    uint256 public constant MAX_LOCK_DURATION = 1460 days; // 4 years maximum
+    mapping(address => uint256) public lastLockTime;
+    uint256 public lockCooldownPeriod = 1 hours; // Minimum time between locks for same account
+    
+    // Snapshot protection
+    mapping(uint256 => bool) public snapshotFinalized;
 
     // Storage gap - reserved space for future upgrades
     uint256[50] private __gap;
@@ -124,6 +143,16 @@ contract LockToken is
     event Freeze(address indexed holder);
     event Unfreeze(address indexed holder);
     event SnapshotCreated(uint256 indexed snapshotId, uint256 totalAddresses, uint256 totalSupply);
+    
+    // Administrative events
+    event ApproveAdded(address indexed approver, address indexed newApproved);
+    event ApproveRemoved(address indexed approver, address indexed removedApproved);
+    event AddressRegistered(address indexed registrar, address indexed newAddress);
+    event AddressUnregistered(address indexed registrar, address indexed removedAddress);
+    event LockupDaysChanged(address indexed owner, uint256 oldDays, uint256 newDays);
+    event AutoUnlockEnabledChanged(address indexed owner, bool enabled);
+    event LockCooldownChanged(address indexed owner, uint256 oldCooldown, uint256 newCooldown);
+    event SnapshotFinalized(uint256 indexed snapshotId);
 
     modifier notFrozen(address _holder) {
         require(!frozenAccount[_holder]);
@@ -178,11 +207,40 @@ contract LockToken is
         require(holder != address(0), "Cannot lock zero address");
         require(value > 0, "Lock amount must be greater than 0");
         require(releaseTime > block.timestamp, "Release time must be in the future");
+        require(releaseTime <= block.timestamp + MAX_LOCK_DURATION, "Lock duration exceeds maximum");
         require(balanceOf(holder) - lockedAmount[holder] >= value, "Insufficient unlocked balance for lock");
+        require(timelockList[holder].length < MAX_LOCKS_PER_ADDRESS, "Too many active locks");
+        
+        // Anti-frontrunning cooldown check (only for third-party locks)
+        if (msg.sender != holder && lastLockTime[holder] + lockCooldownPeriod > block.timestamp) {
+            require(lastLockTime[holder] + lockCooldownPeriod <= block.timestamp, "Lock cooldown period not passed");
+        }
 
         lockedAmount[holder] += value;
         timelockList[holder].push(LockInfo(releaseTime, value));
+        lastLockTime[holder] = block.timestamp;
+        
+        // Sort the locks by release time to maintain order
+        _sortLocksByReleaseTime(holder);
+        
         emit Lock(holder, value, releaseTime, msg.sender);
+    }
+    
+    // Sort locks by release time for efficient processing
+    function _sortLocksByReleaseTime(address holder) internal {
+        LockInfo[] storage locks = timelockList[holder];
+        uint256 length = locks.length;
+        
+        // Simple insertion sort for small arrays (efficient for MAX_LOCKS_PER_ADDRESS = 100)
+        for (uint256 i = 1; i < length; i++) {
+            LockInfo memory key = locks[i];
+            uint256 j = i;
+            while (j > 0 && locks[j - 1]._releaseTime > key._releaseTime) {
+                locks[j] = locks[j - 1];
+                j--;
+            }
+            locks[j] = key;
+        }
     }
 
     // Common unlock logic
@@ -209,18 +267,19 @@ contract LockToken is
     }
 
     // Unlock all expired locks and return the number of unlocked locks
+    // Optimized to stop at first non-expired lock since locks are sorted
     function _autoUnlock(address holder) internal returns (uint256) {
         require(holder != address(0), "Cannot unlock zero address");
-        uint256 i = 0;
         uint256 unlockedCount = 0;
-        while (i < timelockList[holder].length) {
-            if (block.timestamp >= timelockList[holder][i]._releaseTime) {
-                _removeLock(holder, i);
-                unlockedCount++;
-            } else {
-                i++;
-            }
+        
+        // Since locks are sorted by release time, we can process from beginning
+        // and stop when we hit the first non-expired lock
+        while (timelockList[holder].length > 0 && 
+               block.timestamp >= timelockList[holder][0]._releaseTime) {
+            _removeLock(holder, 0);
+            unlockedCount++;
         }
+        
         return unlockedCount;
     }
 
@@ -228,6 +287,7 @@ contract LockToken is
     function _beforeTokenTransfer(address from, address to, uint256 amount)
         internal
         override(ERC20Upgradeable)
+        whenNotPaused
     {
         super._beforeTokenTransfer(from, to, amount); 
 
@@ -236,17 +296,32 @@ contract LockToken is
                 balanceOf(from) - lockedAmount[from] >= amount,
                 "Transfer amount exceeds unlocked balance"
             );
+            _updateAccountSnapshot(from);
+        }
+        
+        if (to != address(0)) {
+            _updateAccountSnapshot(to);
         }
     }
 
     // Configuration functions
     function setLockupDays(uint256 _lockupDays) public onlyOwner {
         require(_lockupDays > 0 && _lockupDays <= 3650, "Lockup days must be between 1 and 3650");
+        uint256 oldDays = lockupDays;
         lockupDays = _lockupDays;
+        emit LockupDaysChanged(msg.sender, oldDays, _lockupDays);
     }
 
     function setAutoUnlockEnabled(bool _enabled) public onlyOwner {
         autoUnlockEnabled = _enabled;
+        emit AutoUnlockEnabledChanged(msg.sender, _enabled);
+    }
+
+    function setLockCooldownPeriod(uint256 _cooldownPeriod) public onlyOwner {
+        require(_cooldownPeriod <= 24 hours, "Cooldown period too long");
+        uint256 oldCooldown = lockCooldownPeriod;
+        lockCooldownPeriod = _cooldownPeriod;
+        emit LockCooldownChanged(msg.sender, oldCooldown, _cooldownPeriod);
     }
 
     // Address management functions
@@ -256,6 +331,7 @@ contract LockToken is
         
         addressList.push(_address);
         isAddressRegistered[_address] = true;
+        emit AddressRegistered(msg.sender, _address);
     }
 
     function unregisterAddress(address _address) public onlyOwner {
@@ -264,16 +340,21 @@ contract LockToken is
         
         // Remove from addressList
         uint256 length = addressList.length;
+        bool found = false;
         for (uint256 i = 0; i < length; i++) {
             if (addressList[i] == _address) {
                 // move last element to current position
                 addressList[i] = addressList[length - 1];
                 addressList.pop();
+                found = true;
                 break;
             }
         }
         
-        isAddressRegistered[_address] = false;
+        if (found) {
+            isAddressRegistered[_address] = false;
+            emit AddressUnregistered(msg.sender, _address);
+        }
     }
 
     function getRegisteredAddresses() public view returns (address[] memory) {
@@ -289,19 +370,34 @@ contract LockToken is
         return timelockList[holder].length;
     }
 
-    // getLockedBalance only returns lockedAmount, so it's OK
-    function getLockedBalance(address owner) public view returns (uint256) {
+    // Clear lock accounting functions
+    function getLockedIncludingExpired(address owner) public view returns (uint256) {
         return lockedAmount[owner];
     }
 
-    function getLockTotal(address holder) public view returns (uint256) {
+    function getLockedUnexpired(address holder) public view returns (uint256) {
         uint256 lockTotal = 0;
+        
+        // Since locks are sorted by release time, we can break early
         for (uint256 idx = 0; idx < timelockList[holder].length; idx++) {
             if (timelockList[holder][idx]._releaseTime > block.timestamp) {
                 lockTotal += timelockList[holder][idx]._amount;
+            } else {
+                // All subsequent locks will also be expired, so we can continue
+                // to count them but we know they don't contribute to current locked amount
+                continue;
             }
         }
         return lockTotal;
+    }
+
+    // Legacy functions for backward compatibility
+    function getLockedBalance(address owner) public view returns (uint256) {
+        return getLockedIncludingExpired(owner);
+    }
+
+    function getLockTotal(address holder) public view returns (uint256) {
+        return getLockedUnexpired(holder);
     }
 
     // Returns the available (transferable) balance: total balance minus locked amount
@@ -474,6 +570,7 @@ contract LockToken is
         override
         whenNotPaused
         notFrozen(msg.sender)
+        notFrozen(to)  
         nonReentrant
         returns (bool)
     {
@@ -490,7 +587,7 @@ contract LockToken is
         address from,
         address to,
         uint256 value
-    ) public override whenNotPaused notFrozen(from) nonReentrant returns (bool) {
+    ) public override whenNotPaused notFrozen(from) notFrozen(to) nonReentrant returns (bool) {
         require(from != address(0), "Cannot transfer from zero address");
         require(to != address(0), "Cannot transfer to zero address");
         require(value > 0, "Transfer amount must be greater than 0");
@@ -501,30 +598,45 @@ contract LockToken is
         return super.transferFrom(from, to, value);
     }
 
-    // Snapshot related functions
+    // Snapshot related functions - Gas efficient implementation
     function snapshot() public onlyOwner returns (uint256) {
         uint256 snapshotId = currentSnapshotId + 1;
         currentSnapshotId = snapshotId;
         
-        uint256 totalSupply = totalSupply();
-        snapshotTotalSupply[snapshotId] = totalSupply;
+        _allSnapshotIds.push(snapshotId);
+        snapshotTotalSupply[snapshotId] = totalSupply();
         snapshotTimestamp[snapshotId] = block.timestamp;
+        snapshotFinalized[snapshotId] = false; // New snapshots start unfinalated
         
-        // Store balance of all registered addresses in snapshot (including locked quantity)
-        uint256 addressCount = addressList.length;
-        address[] storage snapshotAddrList = snapshotAddresses[snapshotId];
-        
-        for (uint256 i = 0; i < addressCount; i++) {
-            address addr = addressList[i];
-            uint256 balance = balanceOf(addr);
-            if (balance > 0) {
-                snapshotBalances[snapshotId][addr] = balance;
-                snapshotAddrList.push(addr);
-            }
-        }
-        
-        emit SnapshotCreated(snapshotId, snapshotAddrList.length, totalSupply);
+        emit SnapshotCreated(snapshotId, 0, totalSupply());
         return snapshotId;
+    }
+    
+    // Finalize snapshot to prevent further modifications
+    function finalizeSnapshot(uint256 snapshotId) public onlyOwner {
+        require(snapshotId > 0 && snapshotId <= currentSnapshotId, "Invalid snapshot ID");
+        require(!snapshotFinalized[snapshotId], "Snapshot already finalized");
+        
+        snapshotFinalized[snapshotId] = true;
+        emit SnapshotFinalized(snapshotId);
+    }
+    
+    // Internal function to update snapshot when balance changes
+    function _updateAccountSnapshot(address account) internal {
+        uint256 currentId = currentSnapshotId;
+        if (currentId == 0 || snapshotFinalized[currentId]) return;
+        
+        uint256[] storage snapshots = _snapshotIds[account];
+        uint256 currentBalance = balanceOf(account);
+        
+        // Prevent duplicate snapshot entries for the same account and snapshot ID
+        if (snapshots.length == 0 || snapshots[snapshots.length - 1] < currentId) {
+            snapshots.push(currentId);
+            _accountBalanceSnapshots[account][currentId] = currentBalance;
+        } else if (snapshots.length > 0 && snapshots[snapshots.length - 1] == currentId) {
+            // Update existing snapshot with current balance
+            _accountBalanceSnapshots[account][currentId] = currentBalance;
+        }
     }
 
     // Function to manually add specific address to snapshot
@@ -559,7 +671,35 @@ contract LockToken is
 
     // Query address balance at specific snapshot (including locked quantity)
     function balanceOfAt(address account, uint256 snapshotId) public view returns (uint256) {
-        return snapshotBalances[snapshotId][account];
+        require(snapshotId > 0 && snapshotId <= currentSnapshotId, "Invalid snapshot ID");
+        
+        uint256[] storage snapshots = _snapshotIds[account];
+        
+        // Binary search for the snapshot
+        uint256 index = _findSnapshotIndex(snapshots, snapshotId);
+        
+        if (index < snapshots.length && snapshots[index] <= snapshotId) {
+            return _accountBalanceSnapshots[account][snapshots[index]];
+        } else {
+            return 0;
+        }
+    }
+    
+    // Binary search helper function
+    function _findSnapshotIndex(uint256[] storage snapshots, uint256 snapshotId) internal view returns (uint256) {
+        uint256 low = 0;
+        uint256 high = snapshots.length;
+        
+        while (low < high) {
+            uint256 mid = (low + high) / 2;
+            if (snapshots[mid] > snapshotId) {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        
+        return high;
     }
 
     function getSnapshotTotalSupply(uint256 snapshotId) public view returns (uint256) {
@@ -570,22 +710,21 @@ contract LockToken is
         return snapshotTimestamp[snapshotId];
     }
 
-    function getSnapshotAddresses(uint256 snapshotId) public view returns (address[] memory) {
-        return snapshotAddresses[snapshotId];
+    function getAllSnapshotIds() public view returns (uint256[] memory) {
+        return _allSnapshotIds;
     }
 
-    function getSnapshotAddressCount(uint256 snapshotId) public view returns (uint256) {
-        return snapshotAddresses[snapshotId].length;
+    function getAccountSnapshotIds(address account) public view returns (uint256[] memory) {
+        return _snapshotIds[account];
     }
 
-    function isAddressInSnapshot(address _address, uint256 snapshotId) public view returns (bool) {
-        address[] memory addresses = snapshotAddresses[snapshotId];
-        for (uint256 i = 0; i < addresses.length; i++) {
-            if (addresses[i] == _address) {
-                return true;
-            }
-        }
-        return false;
+    // Pause management functions
+    function pause() public onlyOwner {
+        _pause();
+    }
+
+    function unpause() public onlyOwner {
+        _unpause();
     }
 
     // Account management functions
