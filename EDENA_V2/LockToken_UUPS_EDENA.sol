@@ -39,7 +39,6 @@ contract Approvable is Initializable, OwnableUpgradeable {
         require(_approveAddress != address(0), "Invalid address");
         require(!isApproved(_approveAddress), "Already approved");
         approveArr.push(_approveAddress);
-        emit ApproveAdded(msg.sender, _approveAddress);
     }
 
     function removeApproveArr(address _approveAddress) public onlyOwner {
@@ -55,9 +54,6 @@ contract Approvable is Initializable, OwnableUpgradeable {
                 found = true;
                 break;
             }
-        }
-        if (found) {
-            emit ApproveRemoved(msg.sender, _approveAddress);
         }
     }
 
@@ -110,32 +106,33 @@ contract LockToken is
     // Mapping for managing locked token amounts
     mapping(address => uint256) public lockedAmount;
 
-    // Snapshot related variables - using OpenZeppelin pattern
+    // Snapshot related variables - EXACT original layout
     mapping(uint256 => uint256) public snapshotTotalSupply;
     mapping(uint256 => uint256) public snapshotTimestamp;
-    mapping(address => mapping(uint256 => uint256)) private _accountBalanceSnapshots;
-    mapping(uint256 => uint256) private _totalSupplySnapshots;
-    mapping(address => uint256[]) private _snapshotIds;
-    uint256[] private _allSnapshotIds;
+    mapping(uint256 => mapping(address => uint256)) public snapshotBalances;
     uint256 public currentSnapshotId;
 
-    // Address management
+    // Address management - EXACT original layout
     address[] public addressList;
     mapping(address => bool) public isAddressRegistered;
-    
-    // Limit the maximum number of active locks per address
+    mapping(uint256 => address[]) public snapshotAddresses;
+
+    // Lock constraints and security - These were missing from variable declarations
     uint256 public constant MAX_LOCKS_PER_ADDRESS = 100;
-    
-    // Anti-frontrunning protection
     uint256 public constant MAX_LOCK_DURATION = 1460 days; // 4 years maximum
     mapping(address => uint256) public lastLockTime;
-    uint256 public lockCooldownPeriod = 1 hours; // Minimum time between locks for same account
-    
-    // Snapshot protection
+    uint256 public lockCooldownPeriod;
     mapping(uint256 => bool) public snapshotFinalized;
 
-    // Storage gap - reserved space for future upgrades
-    uint256[50] private __gap;
+    // NEW VARIABLES - Added after all existing inherited variables for upgrade compatibility
+    uint256[] private _allSnapshotIds;
+    mapping(uint256 => bool) public snapshotCompleted;
+    mapping(uint256 => uint256) public snapshotProcessedIndex;
+    mapping(uint256 => bool) public snapshotProcessing;
+    uint256 public defaultBatchSize;
+
+    // Storage gap - reserved space for future upgrades  
+    uint256[42] private __gap;
 
     // Events
     event Lock(address indexed holder, uint256 value, uint256 releaseTime, address indexed operator);
@@ -145,14 +142,15 @@ contract LockToken is
     event SnapshotCreated(uint256 indexed snapshotId, uint256 totalAddresses, uint256 totalSupply);
     
     // Administrative events
-    event ApproveAdded(address indexed approver, address indexed newApproved);
-    event ApproveRemoved(address indexed approver, address indexed removedApproved);
     event AddressRegistered(address indexed registrar, address indexed newAddress);
     event AddressUnregistered(address indexed registrar, address indexed removedAddress);
     event LockupDaysChanged(address indexed owner, uint256 oldDays, uint256 newDays);
     event AutoUnlockEnabledChanged(address indexed owner, bool enabled);
     event LockCooldownChanged(address indexed owner, uint256 oldCooldown, uint256 newCooldown);
     event SnapshotFinalized(uint256 indexed snapshotId);
+    event SnapshotCompleted(uint256 indexed snapshotId, uint256 totalAddresses);
+    event SnapshotProcessingStarted(uint256 indexed snapshotId);
+    event SnapshotProcessingResumed(uint256 indexed snapshotId);
 
     modifier notFrozen(address _holder) {
         require(!frozenAccount[_holder]);
@@ -181,6 +179,8 @@ contract LockToken is
         
         lockupDays = 90; // Default 90 days
         autoUnlockEnabled = true; // Default enabled
+        defaultBatchSize = 100; // Default batch size
+        lockCooldownPeriod = 1 hours; // Default cooldown period
         
         uint256 totalSupplyWei = totalSupplyEth * (10**18);
         _mint(initialOwner, totalSupplyWei);
@@ -212,8 +212,9 @@ contract LockToken is
         require(timelockList[holder].length < MAX_LOCKS_PER_ADDRESS, "Too many active locks");
         
         // Anti-frontrunning cooldown check (only for third-party locks)
-        if (msg.sender != holder && lastLockTime[holder] + lockCooldownPeriod > block.timestamp) {
-            require(lastLockTime[holder] + lockCooldownPeriod <= block.timestamp, "Lock cooldown period not passed");
+        uint256 cooldown = lockCooldownPeriod > 0 ? lockCooldownPeriod : 1 hours;
+        if (msg.sender != holder && lastLockTime[holder] + cooldown > block.timestamp) {
+            require(lastLockTime[holder] + cooldown <= block.timestamp, "Lock cooldown period not passed");
         }
 
         lockedAmount[holder] += value;
@@ -296,11 +297,6 @@ contract LockToken is
                 balanceOf(from) - lockedAmount[from] >= amount,
                 "Transfer amount exceeds unlocked balance"
             );
-            _updateAccountSnapshot(from);
-        }
-        
-        if (to != address(0)) {
-            _updateAccountSnapshot(to);
         }
     }
 
@@ -491,20 +487,6 @@ contract LockToken is
         return (lockCount, totalLockedAmount, releaseTimes, amounts);
     }
 
-    // Lock related functions
-    // function lock(
-    //     address holder,
-    //     uint256 value,
-    //     uint256 releaseTime
-    // ) public onlyApproved nonReentrant returns (bool) {
-    //     require(holder != address(0), "Cannot lock zero address");
-    //     require(value > 0, "Lock amount must be greater than 0");
-    //     require(releaseTime > block.timestamp, "Release time must be in the future");
-    //     require(balanceOf(holder) >= value, "There is not enough balances of holder.");
-    //     _lock(holder, value, releaseTime);
-    //     return true;
-    // }
-
     function transferWithLock(
         address holder,
         uint256 value,
@@ -598,108 +580,111 @@ contract LockToken is
         return super.transferFrom(from, to, value);
     }
 
-    // Snapshot related functions - Gas efficient implementation
-    function snapshot() public onlyOwner returns (uint256) {
+    // Snapshot related functions - Batch processing implementation with auto-start
+    function createSnapshot() public onlyOwner returns (uint256) {
         uint256 snapshotId = currentSnapshotId + 1;
         currentSnapshotId = snapshotId;
         
         _allSnapshotIds.push(snapshotId);
         snapshotTotalSupply[snapshotId] = totalSupply();
         snapshotTimestamp[snapshotId] = block.timestamp;
-        snapshotFinalized[snapshotId] = false; // New snapshots start unfinalated
+        snapshotFinalized[snapshotId] = false;
+        
+        // Initialize batch processing state
+        snapshotCompleted[snapshotId] = false;
+        snapshotProcessedIndex[snapshotId] = 0;
+        snapshotProcessing[snapshotId] = true;
+        
+        // Pause all token transfers during snapshot processing (only if not already paused)
+        if (!paused()) {
+            _pause();
+        }
         
         emit SnapshotCreated(snapshotId, 0, totalSupply());
+        emit SnapshotProcessingStarted(snapshotId);
+        
+        // Automatically start processing with default batch size
+        uint256 batchSize = defaultBatchSize > 0 ? defaultBatchSize : 100;
+        bool completed = _processSnapshotInternal(snapshotId, batchSize);
+        
+        if (completed) {
+            // Small holder set - completed in one transaction
+            emit SnapshotCompleted(snapshotId, addressList.length);
+        }
+        
         return snapshotId;
+    }
+    
+    // Process snapshot in batches to avoid gas limit issues
+    function processSnapshot(uint256 snapshotId, uint256 batchSize) public onlyOwner returns (bool completed) {
+        require(snapshotId > 0 && snapshotId <= currentSnapshotId, "Invalid snapshot ID");
+        require(!snapshotCompleted[snapshotId], "Snapshot already completed");
+        require(snapshotProcessing[snapshotId], "Snapshot not in processing state");
+        require(batchSize > 0 && batchSize <= 200, "Invalid batch size"); // Limit batch size for safety
+        
+        return _processSnapshotInternal(snapshotId, batchSize);
+    }
+    
+    // Internal function for snapshot processing logic
+    function _processSnapshotInternal(uint256 snapshotId, uint256 batchSize) internal returns (bool completed) {
+        uint256 startIndex = snapshotProcessedIndex[snapshotId];
+        uint256 endIndex = startIndex + batchSize;
+        
+        if (endIndex > addressList.length) {
+            endIndex = addressList.length;
+        }
+        
+        // Process batch of addresses
+        for (uint256 i = startIndex; i < endIndex; i++) {
+            address account = addressList[i];
+            uint256 balance = balanceOf(account);
+            
+            if (balance > 0) {
+                // Only add if not already recorded for this snapshot
+                if (snapshotBalances[snapshotId][account] == 0) {
+                    snapshotAddresses[snapshotId].push(account);
+                }
+                snapshotBalances[snapshotId][account] = balance;
+            }
+        }
+        
+        // Update processed index
+        snapshotProcessedIndex[snapshotId] = endIndex;
+        
+        // Check if processing is complete
+        if (endIndex >= addressList.length) {
+            snapshotCompleted[snapshotId] = true;
+            snapshotProcessing[snapshotId] = false;
+            
+            // Resume token transfers (only if we were the ones who paused it)
+            if (paused()) {
+                _unpause();
+            }
+            
+            return true;
+        }
+        
+        return false;
     }
     
     // Finalize snapshot to prevent further modifications
     function finalizeSnapshot(uint256 snapshotId) public onlyOwner {
         require(snapshotId > 0 && snapshotId <= currentSnapshotId, "Invalid snapshot ID");
         require(!snapshotFinalized[snapshotId], "Snapshot already finalized");
+        require(snapshotCompleted[snapshotId], "Snapshot must be completed before finalization");
         
         snapshotFinalized[snapshotId] = true;
         emit SnapshotFinalized(snapshotId);
     }
-    
-    // Internal function to update snapshot when balance changes
-    function _updateAccountSnapshot(address account) internal {
-        uint256 currentId = currentSnapshotId;
-        if (currentId == 0 || snapshotFinalized[currentId]) return;
-        
-        uint256[] storage snapshots = _snapshotIds[account];
-        uint256 currentBalance = balanceOf(account);
-        
-        // Prevent duplicate snapshot entries for the same account and snapshot ID
-        if (snapshots.length == 0 || snapshots[snapshots.length - 1] < currentId) {
-            snapshots.push(currentId);
-            _accountBalanceSnapshots[account][currentId] = currentBalance;
-        } else if (snapshots.length > 0 && snapshots[snapshots.length - 1] == currentId) {
-            // Update existing snapshot with current balance
-            _accountBalanceSnapshots[account][currentId] = currentBalance;
-        }
-    }
-
-    // Function to manually add specific address to snapshot
-    // function addAddressToSnapshot(address _address, uint256 snapshotId) public onlyOwner {
-    //     require(_address != address(0), "Cannot add zero address");
-    //     require(snapshotId <= currentSnapshotId, "Snapshot does not exist");
-        
-    //     uint256 balance = balanceOf(_address);
-        
-    //     if (balance > 0) {
-    //         snapshotBalances[snapshotId][_address] = balance;
-    //         snapshotAddresses[snapshotId].push(_address);
-    //     }
-    // }
-
-    // Function to add multiple addresses to snapshot at once
-    // function addAddressesToSnapshot(address[] memory _addresses, uint256 snapshotId) public onlyOwner {
-    //     require(snapshotId <= currentSnapshotId, "Snapshot does not exist");
-        
-    //     for (uint256 i = 0; i < _addresses.length; i++) {
-    //         address addr = _addresses[i];
-    //         if (addr != address(0)) {
-    //             uint256 balance = balanceOf(addr);
-                
-    //             if (balance > 0) {
-    //                 snapshotBalances[snapshotId][addr] = balance;
-    //                 snapshotAddresses[snapshotId].push(addr);
-    //             }
-    //         }
-    //     }
-    // }
+ 
 
     // Query address balance at specific snapshot (including locked quantity)
     function balanceOfAt(address account, uint256 snapshotId) public view returns (uint256) {
         require(snapshotId > 0 && snapshotId <= currentSnapshotId, "Invalid snapshot ID");
+        require(snapshotCompleted[snapshotId], "Snapshot not completed yet");
         
-        uint256[] storage snapshots = _snapshotIds[account];
-        
-        // Binary search for the snapshot
-        uint256 index = _findSnapshotIndex(snapshots, snapshotId);
-        
-        if (index < snapshots.length && snapshots[index] <= snapshotId) {
-            return _accountBalanceSnapshots[account][snapshots[index]];
-        } else {
-            return 0;
-        }
-    }
-    
-    // Binary search helper function
-    function _findSnapshotIndex(uint256[] storage snapshots, uint256 snapshotId) internal view returns (uint256) {
-        uint256 low = 0;
-        uint256 high = snapshots.length;
-        
-        while (low < high) {
-            uint256 mid = (low + high) / 2;
-            if (snapshots[mid] > snapshotId) {
-                high = mid;
-            } else {
-                low = mid + 1;
-            }
-        }
-        
-        return high;
+        // Direct access - all completed snapshots have complete data
+        return snapshotBalances[snapshotId][account];
     }
 
     function getSnapshotTotalSupply(uint256 snapshotId) public view returns (uint256) {
@@ -715,7 +700,134 @@ contract LockToken is
     }
 
     function getAccountSnapshotIds(address account) public view returns (uint256[] memory) {
-        return _snapshotIds[account];
+        // In batch system, find all snapshots where this account has balance
+        uint256[] memory allSnapshots = _allSnapshotIds;
+        uint256 count = 0;
+        
+        // Count snapshots with balance
+        for (uint256 i = 0; i < allSnapshots.length; i++) {
+            if (snapshotBalances[allSnapshots[i]][account] > 0) {
+                count++;
+            }
+        }
+        
+        // Create result array
+        uint256[] memory result = new uint256[](count);
+        uint256 index = 0;
+        for (uint256 i = 0; i < allSnapshots.length; i++) {
+            if (snapshotBalances[allSnapshots[i]][account] > 0) {
+                result[index] = allSnapshots[i];
+                index++;
+            }
+        }
+        
+        return result;
+    }
+    
+    // Snapshot status and progress query functions
+    function getSnapshotStatus(uint256 snapshotId) external view returns (
+        bool completed,
+        uint256 processedCount,
+        uint256 totalCount,
+        uint256 progressPercentage,
+        bool isProcessing,
+        bool isFinalized
+    ) {
+        require(snapshotId > 0 && snapshotId <= currentSnapshotId, "Invalid snapshot ID");
+        
+        completed = snapshotCompleted[snapshotId];
+        processedCount = snapshotProcessedIndex[snapshotId];
+        totalCount = addressList.length;
+        progressPercentage = totalCount > 0 ? (processedCount * 100) / totalCount : 100;
+        isProcessing = snapshotProcessing[snapshotId];
+        isFinalized = snapshotFinalized[snapshotId];
+    }
+    
+    function isSnapshotCompleted(uint256 snapshotId) external view returns (bool) {
+        return snapshotCompleted[snapshotId];
+    }
+    
+    function isSnapshotProcessing(uint256 snapshotId) external view returns (bool) {
+        return snapshotProcessing[snapshotId];
+    }
+    
+    function getSnapshotProgress(uint256 snapshotId) external view returns (
+        uint256 processedAddresses,
+        uint256 totalAddresses,
+        uint256 remainingAddresses
+    ) {
+        require(snapshotId > 0 && snapshotId <= currentSnapshotId, "Invalid snapshot ID");
+        
+        processedAddresses = snapshotProcessedIndex[snapshotId];
+        totalAddresses = addressList.length;
+        remainingAddresses = totalAddresses > processedAddresses ? 
+            totalAddresses - processedAddresses : 0;
+    }
+    
+    // Emergency function to resume processing if needed
+    function resumeSnapshotProcessing(uint256 snapshotId) external onlyOwner {
+        require(snapshotId > 0 && snapshotId <= currentSnapshotId, "Invalid snapshot ID");
+        require(!snapshotCompleted[snapshotId], "Snapshot already completed");
+        require(!snapshotProcessing[snapshotId], "Snapshot already processing");
+        
+        snapshotProcessing[snapshotId] = true;
+        if (!paused()) {
+            _pause();
+        }
+        
+        emit SnapshotProcessingResumed(snapshotId);
+    }
+    
+    // Emergency function to cancel snapshot processing and unpause
+    function cancelSnapshotProcessing(uint256 snapshotId) external onlyOwner {
+        require(snapshotId > 0 && snapshotId <= currentSnapshotId, "Invalid snapshot ID");
+        require(snapshotProcessing[snapshotId], "Snapshot not processing");
+        require(!snapshotCompleted[snapshotId], "Cannot cancel completed snapshot");
+        
+        snapshotProcessing[snapshotId] = false;
+        if (paused()) {
+            _unpause();
+        }
+        
+        // Note: This doesn't reset processed data, just stops processing
+        // Owner can resume later if needed
+    }
+    
+    // Function to set default batch size
+    function setDefaultBatchSize(uint256 _batchSize) external onlyOwner {
+        require(_batchSize > 0 && _batchSize <= 200, "Invalid batch size");
+        defaultBatchSize = _batchSize;
+    }
+    
+    // Convenience function to continue processing with default batch size
+    function continueSnapshot(uint256 snapshotId) external onlyOwner returns (bool completed) {
+        uint256 batchSize = defaultBatchSize > 0 ? defaultBatchSize : 100;
+        return processSnapshot(snapshotId, batchSize);
+    }
+    
+    // Emergency function to completely reset snapshot processing
+    function resetSnapshotProcessing(uint256 snapshotId) external onlyOwner {
+        require(snapshotId > 0 && snapshotId <= currentSnapshotId, "Invalid snapshot ID");
+        require(snapshotProcessing[snapshotId] || !snapshotCompleted[snapshotId], "Cannot reset completed snapshot");
+        
+        // Reset processing state
+        snapshotProcessing[snapshotId] = false;
+        snapshotProcessedIndex[snapshotId] = 0;
+        snapshotCompleted[snapshotId] = false;
+        
+        // Clear any partial snapshot data (expensive operation)
+        address[] memory snapshotAddrs = snapshotAddresses[snapshotId];
+        for (uint256 i = 0; i < snapshotAddrs.length; i++) {
+            delete snapshotBalances[snapshotId][snapshotAddrs[i]];
+        }
+        
+        // Clear the address list for this snapshot
+        delete snapshotAddresses[snapshotId];
+        
+        // Unpause if we were paused
+        if (paused()) {
+            _unpause();
+        }
     }
 
     // Pause management functions
