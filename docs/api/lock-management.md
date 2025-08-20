@@ -22,40 +22,17 @@ struct LockInfo {
 
 ## Lock Creation Functions
 
-### `lock()`
+### ⚠️ Important Notice
 
-Locks tokens that the holder already possesses.
+The `lock()` function has been **removed** in EDENA Token V2 for security reasons. All lock creation now happens through transfer-based functions to prevent unauthorized locking and improve security.
 
-```solidity
-function lock(
-    address holder,
-    uint256 value,
-    uint256 releaseTime
-) public onlyApproved nonReentrant returns (bool)
-```
+### Security Features
 
-**Parameters:**
-
-- `holder`: Address whose tokens will be locked
-- `value`: Amount of tokens to lock (in wei)
-- `releaseTime`: Unix timestamp when tokens can be unlocked
-
-**Requirements:**
-
-- Caller must be approved or owner
-- `holder` cannot be zero address
-- `value` must be greater than 0
-- `releaseTime` must be in the future
-- Holder must have sufficient unlocked balance
-
-**Example:**
-
-```solidity
-// Lock 1000 tokens for 90 days
-uint256 amount = 1000 * 10**18;
-uint256 releaseTime = block.timestamp + (90 * 24 * 60 * 60);
-lockToken.lock(userAddress, amount, releaseTime);
-```
+- **Maximum Locks Per Address**: Limited to 100 active locks per address (`MAX_LOCKS_PER_ADDRESS`)
+- **Lock Cooldown Period**: Minimum time between locks for same account (default: 1 hour, configurable)
+- **Maximum Lock Duration**: Cannot exceed 4 years (`MAX_LOCK_DURATION` = 1460 days)
+- **Anti-frontrunning Protection**: Cooldown applies to third-party lock operations
+- **Transfer-Only Locking**: Locks can only be created through transfer functions for enhanced security
 
 ### `transferWithLock()`
 
@@ -80,6 +57,8 @@ function transferWithLock(
 - Auto-registers recipient if not already registered
 - Atomic transfer + lock operation
 - Prevents double-spending attacks
+- Respects all security constraints (cooldown, max locks, max duration)
+- Only approved addresses can execute
 
 **Example:**
 
@@ -203,15 +182,33 @@ function unlock(address holder, uint256 idx) public onlyApproved nonReentrant re
 
 ## Lock Query Functions
 
-### `getLockedBalance()`
+### `getLockedBalance()` (Legacy)
 
-Returns total locked amount for an address.
+Returns total locked amount for an address (includes expired locks).
 
 ```solidity
 function getLockedBalance(address owner) public view returns (uint256)
 ```
 
 **Gas Optimized:** Uses `lockedAmount` mapping for O(1) lookup.
+
+### `getLockedIncludingExpired()`
+
+Returns total locked amount including expired locks.
+
+```solidity
+function getLockedIncludingExpired(address owner) public view returns (uint256)
+```
+
+### `getLockedUnexpired()`
+
+Returns only currently locked tokens (excludes expired locks).
+
+```solidity
+function getLockedUnexpired(address holder) public view returns (uint256)
+```
+
+**Performance:** Early termination when encountering non-expired locks due to sorted storage.
 
 ### `getAvailableBalance()`
 
@@ -275,6 +272,16 @@ for (uint i = 0; i < count; i++) {
 
 ## Aggregate Query Functions
 
+### `getLockTotal()` (Legacy)
+
+Legacy function for backward compatibility.
+
+```solidity
+function getLockTotal(address holder) public view returns (uint256)
+```
+
+**Note:** Returns same as `getLockedUnexpired()`.
+
 ### `getLockSummary()`
 
 Returns overall lock statistics across all addresses.
@@ -336,6 +343,28 @@ function transfer(address to, uint256 value) public override {
 
 ## Gas Optimization
 
+### Lock Sorting for Efficiency
+
+Locks are automatically sorted by release time for optimal processing:
+
+```solidity
+function _sortLocksByReleaseTime(address holder) internal {
+    // Simple insertion sort for small arrays (efficient for MAX_LOCKS_PER_ADDRESS = 100)
+    LockInfo[] storage locks = timelockList[holder];
+    uint256 length = locks.length;
+
+    for (uint256 i = 1; i < length; i++) {
+        LockInfo memory key = locks[i];
+        uint256 j = i;
+        while (j > 0 && locks[j - 1]._releaseTime > key._releaseTime) {
+            locks[j] = locks[j - 1];
+            j--;
+        }
+        locks[j] = key;
+    }
+}
+```
+
 ### Efficient Lock Removal
 
 The contract uses an optimized removal algorithm:
@@ -362,26 +391,29 @@ function _removeLock(address holder, uint256 idx) internal {
 
 ### Batch Operations
 
-Multiple expired locks are processed in a single transaction:
+Multiple expired locks are processed efficiently using sorted storage:
 
 ```solidity
 function _autoUnlock(address holder) internal returns (uint256) {
     uint256 unlockedCount = 0;
-    uint256 i = 0;
 
-    while (i < timelockList[holder].length) {
-        if (block.timestamp >= timelockList[holder][i]._releaseTime) {
-            _removeLock(holder, i);
-            unlockedCount++;
-            // Don't increment i since array shrunk
-        } else {
-            i++;
-        }
+    // Since locks are sorted by release time, we can process from beginning
+    // and stop when we hit the first non-expired lock
+    while (timelockList[holder].length > 0 &&
+           block.timestamp >= timelockList[holder][0]._releaseTime) {
+        _removeLock(holder, 0);
+        unlockedCount++;
     }
 
     return unlockedCount;
 }
 ```
+
+**Optimization Benefits:**
+
+- Sorted storage enables early termination
+- Process only expired locks efficiently
+- Reduced gas costs for large lock arrays
 
 ## Events
 

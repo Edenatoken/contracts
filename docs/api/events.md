@@ -16,7 +16,7 @@ Events for account state changes and permissions.
 
 Events for snapshot creation and management.
 
-### System Events
+### Administrative Events
 
 Events for contract administration and configuration.
 
@@ -181,7 +181,7 @@ contract FreezeAnalytics {
 
 ### `SnapshotCreated` Event
 
-Emitted when a new snapshot is created.
+Emitted when a new batch snapshot is created.
 
 ```solidity
 event SnapshotCreated(uint256 indexed snapshotId, uint256 totalAddresses, uint256 totalSupply);
@@ -190,34 +190,217 @@ event SnapshotCreated(uint256 indexed snapshotId, uint256 totalAddresses, uint25
 **Parameters:**
 
 - `snapshotId` (indexed): Unique identifier for the snapshot
-- `totalAddresses`: Number of addresses included in the snapshot
+- `totalAddresses`: Number of addresses to be processed (0 initially)
 - `totalSupply`: Total token supply at snapshot time
 
 **Triggered by:**
 
-- `snapshot()` - Manual snapshot creation
+- `createSnapshot()` - Batch snapshot creation
+
+### `SnapshotProcessingStarted` Event
+
+Emitted when batch processing begins for a snapshot.
+
+```solidity
+event SnapshotProcessingStarted(uint256 indexed snapshotId);
+```
+
+**Parameters:**
+
+- `snapshotId` (indexed): ID of the snapshot starting processing
+
+**Triggered by:**
+
+- `createSnapshot()` - Automatic processing start
+- `resumeSnapshotProcessing()` - Manual processing resume
+
+### `SnapshotProcessingResumed` Event
+
+Emitted when processing is resumed for a paused snapshot.
+
+```solidity
+event SnapshotProcessingResumed(uint256 indexed snapshotId);
+```
+
+**Parameters:**
+
+- `snapshotId` (indexed): ID of the snapshot being resumed
+
+**Triggered by:**
+
+- `resumeSnapshotProcessing()` - Manual processing resume
+
+### `SnapshotCompleted` Event
+
+Emitted when all addresses have been processed for a snapshot.
+
+```solidity
+event SnapshotCompleted(uint256 indexed snapshotId, uint256 totalAddresses);
+```
+
+**Parameters:**
+
+- `snapshotId` (indexed): ID of the completed snapshot
+- `totalAddresses`: Total number of addresses processed
+
+**Triggered by:**
+
+- `_processSnapshotInternal()` - When processing reaches the end
+
+### `SnapshotFinalized` Event
+
+Emitted when a completed snapshot is finalized to prevent further modifications.
+
+```solidity
+event SnapshotFinalized(uint256 indexed snapshotId);
+```
+
+**Parameters:**
+
+- `snapshotId` (indexed): ID of the finalized snapshot
+
+**Triggered by:**
+
+- `finalizeSnapshot()` - Manual snapshot finalization
 
 **Example Usage:**
 
 ```solidity
-// Governance snapshot tracking
+// Batch snapshot monitoring for governance
 contract GovernanceManager {
     mapping(uint256 => ProposalData) public proposals;
+    mapping(uint256 => bool) public snapshotReady;
 
     function onSnapshotCreated(uint256 snapshotId, uint256 totalAddresses, uint256 totalSupply) external {
-        // Create governance proposal with this snapshot
+        // Initialize proposal data
         proposals[currentProposalId] = ProposalData({
             snapshotId: snapshotId,
-            eligibleVoters: totalAddresses,
             totalVotingPower: totalSupply,
-            created: block.timestamp
+            created: block.timestamp,
+            processingComplete: false
         });
+    }
+
+    function onSnapshotCompleted(uint256 snapshotId, uint256 totalAddresses) external {
+        // Mark snapshot as ready for voting
+        snapshotReady[snapshotId] = true;
+
+        // Update proposal data
+        for (uint256 i = 0; i < proposalCount; i++) {
+            if (proposals[i].snapshotId == snapshotId) {
+                proposals[i].eligibleVoters = totalAddresses;
+                proposals[i].processingComplete = true;
+                break;
+            }
+        }
 
         // Notify governance participants
-        notifyGovernanceParticipants(snapshotId);
+        notifyGovernanceParticipants(snapshotId, "Snapshot ready for voting");
+    }
+
+    function onSnapshotProcessingStarted(uint256 snapshotId) external {
+        // Log processing start
+        emit ProcessingUpdate(snapshotId, "Batch processing started");
     }
 }
 ```
+
+## Administrative Events
+
+### `ApproveAdded` Event
+
+Emitted when a new address is added to the approved list.
+
+```solidity
+event ApproveAdded(address indexed approver, address indexed newApproved);
+```
+
+**Parameters:**
+
+- `approver` (indexed): Address that added the approval (owner)
+- `newApproved` (indexed): Address that was approved
+
+**Triggered by:**
+
+- `addApproveArr()` - Adding approved address
+
+### `ApproveRemoved` Event
+
+Emitted when an address is removed from the approved list.
+
+```solidity
+event ApproveRemoved(address indexed approver, address indexed removedApproved);
+```
+
+**Parameters:**
+
+- `approver` (indexed): Address that removed the approval (owner)
+- `removedApproved` (indexed): Address that was removed
+
+**Triggered by:**
+
+- `removeApproveArr()` - Removing approved address
+
+### `AddressRegistered` Event
+
+Emitted when a new address is registered for tracking.
+
+```solidity
+event AddressRegistered(address indexed registrar, address indexed newAddress);
+```
+
+**Parameters:**
+
+- `registrar` (indexed): Address that performed registration (owner)
+- `newAddress` (indexed): Address that was registered
+
+**Triggered by:**
+
+- `registerAddress()` - Manual registration
+- Auto-registration during transfers
+
+### `AddressUnregistered` Event
+
+Emitted when an address is removed from the registry.
+
+```solidity
+event AddressUnregistered(address indexed registrar, address indexed removedAddress);
+```
+
+**Parameters:**
+
+- `registrar` (indexed): Address that performed unregistration (owner)
+- `removedAddress` (indexed): Address that was unregistered
+
+**Triggered by:**
+
+- `unregisterAddress()` - Manual unregistration
+
+### Configuration Events
+
+#### `LockupDaysChanged` Event
+
+```solidity
+event LockupDaysChanged(address indexed owner, uint256 oldDays, uint256 newDays);
+```
+
+**Triggered by:** `setLockupDays()`
+
+#### `AutoUnlockEnabledChanged` Event
+
+```solidity
+event AutoUnlockEnabledChanged(address indexed owner, bool enabled);
+```
+
+**Triggered by:** `setAutoUnlockEnabled()`
+
+#### `LockCooldownChanged` Event
+
+```solidity
+event LockCooldownChanged(address indexed owner, uint256 oldCooldown, uint256 newCooldown);
+```
+
+**Triggered by:** `setLockCooldownPeriod()`
 
 ## System Events (Inherited)
 
@@ -310,7 +493,7 @@ const lockEvents = await lockToken.queryFilter(
 ### Real-time Monitoring
 
 ```javascript
-// Listen for new lock events
+// Listen for lock events
 lockToken.on("Lock", (holder, value, releaseTime, operator, event) => {
   console.log(
     `New lock: ${holder} locked ${value} tokens until ${releaseTime}`
@@ -326,6 +509,26 @@ lockToken.on("Unlock", (holder, value, operator, event) => {
 
   // Update analytics
   recordUnlockEvent(holder, value, operator);
+});
+
+// Listen for snapshot events
+lockToken.on("SnapshotCreated", (snapshotId, totalAddresses, totalSupply) => {
+  console.log(
+    `Snapshot ${snapshotId} created, processing ${totalAddresses} addresses`
+  );
+  updateSnapshotStatus(snapshotId, "processing");
+});
+
+lockToken.on("SnapshotCompleted", (snapshotId, totalAddresses) => {
+  console.log(
+    `Snapshot ${snapshotId} completed with ${totalAddresses} addresses`
+  );
+  updateSnapshotStatus(snapshotId, "completed");
+});
+
+lockToken.on("SnapshotProcessingStarted", (snapshotId) => {
+  console.log(`Batch processing started for snapshot ${snapshotId}`);
+  showProcessingIndicator(snapshotId);
 });
 ```
 

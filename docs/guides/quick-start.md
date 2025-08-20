@@ -43,20 +43,41 @@ const LOCK_TOKEN_ABI = [
   "function balanceOf(address owner) view returns (uint256)",
   "function transfer(address to, uint256 amount) returns (bool)",
   "function approve(address spender, uint256 amount) returns (bool)",
+  "function burn(uint256 amount) returns (bool)",
 
   // Lock management
   "function getLockedBalance(address owner) view returns (uint256)",
+  "function getLockedIncludingExpired(address owner) view returns (uint256)",
+  "function getLockedUnexpired(address holder) view returns (uint256)",
   "function getAvailableBalance(address owner) view returns (uint256)",
   "function claim() returns (uint256)",
+  "function manualUnlock(address holder) returns (uint256)",
+  "function unlock(address holder, uint256 idx) returns (bool)",
   "function getLockDetails(address holder) view returns (uint256, uint256, uint256[], uint256[])",
+  "function getLockCount(address holder) view returns (uint256)",
+
+  // Transfer with lock (requires approval)
+  "function transferWithLock(address holder, uint256 value, uint256 releaseTime) returns (bool)",
+  "function transferWithLockEasy(address holder, uint256 valueEth, uint256 lockupDaysParam) returns (bool)",
+  "function transferWithLockBase(address holder, uint256 value) returns (bool)",
 
   // Snapshot
+  "function snapshot() returns (uint256)",
+  "function finalizeSnapshot(uint256 snapshotId)",
   "function balanceOfAt(address account, uint256 snapshotId) view returns (uint256)",
+  "function getSnapshotTotalSupply(uint256 snapshotId) view returns (uint256)",
+  "function getAllSnapshotIds() view returns (uint256[])",
+
+  // Account management
+  "function isAddressRegistered(address _address) view returns (bool)",
+  "function frozenAccount(address holder) view returns (bool)",
 
   // Events
   "event Lock(address indexed holder, uint256 value, uint256 releaseTime, address indexed operator)",
   "event Unlock(address indexed holder, uint256 value, address indexed operator)",
   "event Transfer(address indexed from, address indexed to, uint256 value)",
+  "event SnapshotCreated(uint256 indexed snapshotId, uint256 totalAddresses, uint256 totalSupply)",
+  "event SnapshotFinalized(uint256 indexed snapshotId)",
 ];
 
 // Create contract instance
@@ -168,7 +189,7 @@ async function claimExpiredLocks(signer) {
     let expiredAmount = ethers.BigNumber.from(0);
 
     for (let i = 0; i < lockCount; i++) {
-      if (releaseTimes[i].lte(now)) {
+      if (releaseTimes[i].toNumber() <= now) {
         expiredCount++;
         expiredAmount = expiredAmount.add(amounts[i]);
       }

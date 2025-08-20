@@ -46,19 +46,27 @@ class EDENATokenIntegration {
     return await this.contract.balanceOf(address);
   }
 
-  // Enhanced balance info
+  // Enhanced balance info including locked tokens
   async getDetailedBalance(address) {
-    const [total, locked, available] = await Promise.all([
-      this.contract.balanceOf(address),
-      this.contract.getLockedBalance(address),
-      this.contract.getAvailableBalance(address),
-    ]);
+    const [total, lockedIncludingExpired, lockedUnexpired, available] =
+      await Promise.all([
+        this.contract.balanceOf(address),
+        this.contract.getLockedIncludingExpired(address),
+        this.contract.getLockedUnexpired(address),
+        this.contract.getAvailableBalance(address),
+      ]);
 
     return {
       total: ethers.utils.formatEther(total),
-      locked: ethers.utils.formatEther(locked),
+      lockedIncludingExpired: ethers.utils.formatEther(lockedIncludingExpired),
+      lockedUnexpired: ethers.utils.formatEther(lockedUnexpired),
       available: ethers.utils.formatEther(available),
-      lockedPercentage: total.gt(0) ? locked.mul(100).div(total).toNumber() : 0,
+      lockedPercentage: total.gt(0)
+        ? lockedIncludingExpired.mul(100).div(total).toNumber()
+        : 0,
+      expiredAmount: ethers.utils.formatEther(
+        lockedIncludingExpired.sub(lockedUnexpired)
+      ),
     };
   }
 }
@@ -86,9 +94,16 @@ class EDENAWallet {
 
   // Balance management
   async getPortfolio() {
-    const [total, locked, available, lockDetails] = await Promise.all([
+    const [
+      total,
+      lockedIncludingExpired,
+      lockedUnexpired,
+      available,
+      lockDetails,
+    ] = await Promise.all([
       this.contract.balanceOf(this.address),
-      this.contract.getLockedBalance(this.address),
+      this.contract.getLockedIncludingExpired(this.address),
+      this.contract.getLockedUnexpired(this.address),
       this.contract.getAvailableBalance(this.address),
       this.contract.getLockDetails(this.address),
     ]);
@@ -110,8 +125,14 @@ class EDENAWallet {
     return {
       balances: {
         total: ethers.utils.formatEther(total),
-        locked: ethers.utils.formatEther(locked),
+        lockedIncludingExpired: ethers.utils.formatEther(
+          lockedIncludingExpired
+        ),
+        lockedUnexpired: ethers.utils.formatEther(lockedUnexpired),
         available: ethers.utils.formatEther(available),
+        expiredAmount: ethers.utils.formatEther(
+          lockedIncludingExpired.sub(lockedUnexpired)
+        ),
       },
       locks,
       summary: {
@@ -303,23 +324,35 @@ class EDENALendingProtocol {
 
   // Calculate collateral value
   async calculateCollateralValue(userAddress) {
-    const availableBalance = await this.edenaToken.getAvailableBalance(
-      userAddress
-    );
-    const lockedBalance = await this.edenaToken.getLockedBalance(userAddress);
+    const [availableBalance, lockedUnexpired, lockedExpired] =
+      await Promise.all([
+        this.edenaToken.getAvailableBalance(userAddress),
+        this.edenaToken.getLockedUnexpired(userAddress),
+        this.edenaToken
+          .getLockedIncludingExpired(userAddress)
+          .then((total) =>
+            total.sub(this.edenaToken.getLockedUnexpired(userAddress))
+          ),
+      ]);
 
-    // Available tokens can be used as collateral immediately
-    // Locked tokens have reduced collateral value
-    const availableCollateral = availableBalance.mul(100); // 100% collateral ratio
-    const lockedCollateral = lockedBalance.mul(50); // 50% collateral ratio for locked tokens
+    // Available tokens: 100% collateral ratio
+    // Unexpired locked tokens: 60% collateral ratio
+    // Expired (claimable) tokens: 90% collateral ratio
+    const availableCollateral = availableBalance.mul(100);
+    const lockedCollateral = lockedUnexpired.mul(60);
+    const expiredCollateral = lockedExpired.mul(90);
 
     return {
       availableCollateral: ethers.utils.formatEther(
         availableCollateral.div(100)
       ),
       lockedCollateral: ethers.utils.formatEther(lockedCollateral.div(100)),
+      expiredCollateral: ethers.utils.formatEther(expiredCollateral.div(100)),
       totalCollateral: ethers.utils.formatEther(
-        availableCollateral.add(lockedCollateral).div(100)
+        availableCollateral
+          .add(lockedCollateral)
+          .add(expiredCollateral)
+          .div(100)
       ),
     };
   }
@@ -549,11 +582,11 @@ class EDENAGovernanceIntegration {
     );
   }
 
-  // Create proposal snapshot
+  // Create batch proposal snapshot
   async createProposalSnapshot(proposalId) {
     try {
       // Only owner can create snapshots
-      const tx = await this.edenaToken.snapshot();
+      const tx = await this.edenaToken.createSnapshot();
       const receipt = await tx.wait();
 
       // Extract snapshot ID from event
@@ -562,43 +595,118 @@ class EDENAGovernanceIntegration {
       );
       const snapshotId = snapshotEvent.args.snapshotId;
 
-      console.log(`Created snapshot ${snapshotId} for proposal ${proposalId}`);
+      console.log(
+        `Created batch snapshot ${snapshotId} for proposal ${proposalId}`
+      );
+
+      // Wait for snapshot to complete processing
+      const completed = await this.waitForSnapshotCompletion(snapshotId);
+
+      if (!completed) {
+        throw new Error("Snapshot processing failed to complete");
+      }
 
       return {
         proposalId,
         snapshotId: snapshotId.toNumber(),
         blockNumber: receipt.blockNumber,
         timestamp: Date.now(),
+        processingCompleted: true,
       };
     } catch (error) {
-      throw new Error(`Snapshot creation failed: ${error.message}`);
+      throw new Error(`Batch snapshot creation failed: ${error.message}`);
     }
   }
 
-  // Calculate voting power
+  // Wait for batch snapshot to complete
+  async waitForSnapshotCompletion(snapshotId, maxWaitTime = 300000) {
+    // 5 minutes max
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxWaitTime) {
+      try {
+        const isCompleted = await this.edenaToken.isSnapshotCompleted(
+          snapshotId
+        );
+
+        if (isCompleted) {
+          console.log(`Snapshot ${snapshotId} processing completed`);
+          return true;
+        }
+
+        // Check progress
+        const status = await this.edenaToken.getSnapshotStatus(snapshotId);
+        console.log(
+          `Snapshot ${snapshotId} progress: ${status.progressPercentage}% ` +
+            `(${status.processedCount}/${status.totalCount})`
+        );
+
+        // If still processing, try to continue
+        if (status.isProcessing && !status.completed) {
+          try {
+            await this.edenaToken.continueSnapshot(snapshotId);
+          } catch (continueError) {
+            console.warn(
+              `Failed to continue snapshot processing: ${continueError.message}`
+            );
+          }
+        }
+
+        // Wait before next check
+        await new Promise((resolve) => setTimeout(resolve, 5000)); // 5 seconds
+      } catch (error) {
+        console.error(`Error checking snapshot status: ${error.message}`);
+        await new Promise((resolve) => setTimeout(resolve, 10000)); // 10 seconds on error
+      }
+    }
+
+    throw new Error(
+      `Snapshot ${snapshotId} did not complete within ${maxWaitTime}ms`
+    );
+  }
+
+  // Calculate voting power from completed snapshot
   async getVotingPower(voterAddress, snapshotId) {
+    // Ensure snapshot is completed before querying
+    const isCompleted = await this.edenaToken.isSnapshotCompleted(snapshotId);
+    if (!isCompleted) {
+      throw new Error(`Snapshot ${snapshotId} is not completed yet`);
+    }
+
     const balance = await this.edenaToken.balanceOfAt(voterAddress, snapshotId);
     return ethers.utils.formatEther(balance);
   }
 
-  // Get all eligible voters
+  // Get all eligible voters from completed snapshot
   async getEligibleVoters(snapshotId, minimumBalance = "100") {
-    const addresses = await this.edenaToken.getSnapshotAddresses(snapshotId);
+    // Ensure snapshot is completed
+    const isCompleted = await this.edenaToken.isSnapshotCompleted(snapshotId);
+    if (!isCompleted) {
+      throw new Error(`Snapshot ${snapshotId} is not completed yet`);
+    }
+
+    // Get all registered addresses (batch system includes all registered addresses)
+    const addresses = await this.edenaToken.getRegisteredAddresses();
     const minimumWei = ethers.utils.parseEther(minimumBalance);
 
     const eligibleVoters = [];
 
     for (const address of addresses) {
-      const balance = await this.edenaToken.balanceOfAt(address, snapshotId);
-      if (balance.gte(minimumWei)) {
-        eligibleVoters.push({
-          address,
-          votingPower: ethers.utils.formatEther(balance),
-        });
+      try {
+        const balance = await this.edenaToken.balanceOfAt(address, snapshotId);
+        if (balance.gte(minimumWei)) {
+          eligibleVoters.push({
+            address,
+            votingPower: ethers.utils.formatEther(balance),
+          });
+        }
+      } catch (error) {
+        // Address might not have balance in snapshot, skip
+        continue;
       }
     }
 
-    // Sort by voting power
+    // Sort by voting power (highest first)
     eligibleVoters.sort(
       (a, b) => parseFloat(b.votingPower) - parseFloat(a.votingPower)
     );
@@ -774,11 +882,34 @@ class EDENAAnalytics {
     });
   }
 
-  onSnapshot(snapshotId, totalAddresses, totalSupply) {
-    this.recordEvent("snapshot", {
+  // Batch snapshot event handlers
+  onSnapshotCreated(snapshotId, totalAddresses, totalSupply) {
+    this.recordEvent("snapshot_created", {
       snapshotId: snapshotId.toNumber(),
       totalAddresses: totalAddresses.toNumber(),
       totalSupply: ethers.utils.formatEther(totalSupply),
+      timestamp: Date.now(),
+    });
+  }
+
+  onSnapshotProcessingStarted(snapshotId) {
+    this.recordEvent("snapshot_processing_started", {
+      snapshotId: snapshotId.toNumber(),
+      timestamp: Date.now(),
+    });
+  }
+
+  onSnapshotCompleted(snapshotId, totalAddresses) {
+    this.recordEvent("snapshot_completed", {
+      snapshotId: snapshotId.toNumber(),
+      totalAddresses: totalAddresses.toNumber(),
+      timestamp: Date.now(),
+    });
+  }
+
+  onSnapshotProcessingResumed(snapshotId) {
+    this.recordEvent("snapshot_processing_resumed", {
+      snapshotId: snapshotId.toNumber(),
       timestamp: Date.now(),
     });
   }
