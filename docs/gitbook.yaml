@@ -31,5 +31,5 @@ pdf:
 # Variables for templating
 variables:
   contractAddress: "0x..." # To be updated after deployment
-  network: "Polygon"
+  network: "Ethereum"
   version: "2.0.0"

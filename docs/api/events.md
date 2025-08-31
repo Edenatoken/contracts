@@ -701,7 +701,7 @@ function sendToAnalytics(eventName, data) {
   analytics.track(eventName, {
     ...data,
     timestamp: Date.now(),
-    network: "polygon",
+    network: "ethereum",
     contract: lockToken.address,
   });
 }

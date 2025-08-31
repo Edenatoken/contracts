@@ -6,8 +6,8 @@ Get up and running with EDENA Token V2 in minutes. This guide covers the essenti
 
 - **Node.js** (v16 or higher)
 - **Web3 library** (ethers.js or web3.js)
-- **Polygon network access** (RPC endpoint)
-- **Wallet** with MATIC for gas fees
+- **Ethereum network access** (RPC endpoint)
+- **Wallet** with ETH for gas fees
 
 ## Installation
 
@@ -30,9 +30,9 @@ npm install web3
 ```javascript
 import { ethers } from "ethers";
 
-// Connect to Polygon network
+// Connect to Ethereum network
 const provider = new ethers.providers.JsonRpcProvider(
-  "https://polygon-rpc.com"
+  "https://mainnet.infura.io/v3/YOUR_PROJECT_ID"
 );
 
 const CONTRACT_ADDRESS = "0x6658c12Ee0A2D3127E006d168964f8FA17ab435E";
@@ -462,7 +462,7 @@ async function safeTransfer(signer, to, amount) {
     return await tx.wait();
   } catch (error) {
     if (error.code === "INSUFFICIENT_FUNDS") {
-      throw new Error("Insufficient MATIC for gas fees");
+      throw new Error("Insufficient ETH for gas fees");
     } else if (
       error.message.includes("Transfer amount exceeds unlocked balance")
     ) {

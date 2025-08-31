@@ -32,6 +32,7 @@ EDENA Token V2 is a next-generation ERC20 token that implements:
 - O(1) locked balance queries via `lockedAmount` mapping
 - Efficient array management for lock removal
 - Batch processing for multiple operations
+- **Ethereum mainnet optimized**: Careful gas usage for mainnet deployment
 
 ### Enterprise Security
 
@@ -60,7 +61,7 @@ EDENA Token V2 is a next-generation ERC20 token that implements:
 | **Total Supply**     | 1,000,000,000 EDENA     |
 | **Decimals**         | 18                      |
 | **Contract Name**    | LockToken               |
-| **Network**          | Polygon                 |
+| **Network**          | Ethereum                |
 | **Contract Address** | `0x...` (To be updated) |
 
 ## Technical Specifications

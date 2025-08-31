@@ -22,9 +22,9 @@ const CONTRACT_CONFIG = {
   address: "0x...", // Replace with deployed address
   abi: LOCK_TOKEN_ABI, // Full ABI
   network: {
-    name: "polygon",
-    chainId: 137,
-    rpc: "https://polygon-rpc.com",
+    name: "ethereum",
+    chainId: 1,
+    rpc: "https://mainnet.infura.io/v3/YOUR_PROJECT_ID",
   },
 };
 
@@ -236,7 +236,7 @@ class EDENAWallet {
   // Error formatting
   formatError(error) {
     if (error.code === "INSUFFICIENT_FUNDS") {
-      return new Error("Insufficient MATIC for gas fees");
+      return new Error("Insufficient ETH for gas fees");
     } else if (
       error.message.includes("Transfer amount exceeds unlocked balance")
     ) {
@@ -952,7 +952,7 @@ class EDENAErrorHandler {
 
     // Handle common web3 errors
     if (error.code === "INSUFFICIENT_FUNDS") {
-      return new Error("Insufficient MATIC for gas fees");
+      return new Error("Insufficient ETH for gas fees");
     }
 
     if (error.code === "UNPREDICTABLE_GAS_LIMIT") {

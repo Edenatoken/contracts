@@ -3,10 +3,10 @@
 ![Solidity](https://img.shields.io/badge/Solidity-0.8.22-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 ![OpenZeppelin](https://img.shields.io/badge/OpenZeppelin-5.0-orange.svg)
-![Polygon](https://img.shields.io/badge/Polygon-Ready-purple.svg)
+![Ethereum](https://img.shields.io/badge/Ethereum-Mainnet-blue.svg)
 ![UUPS](https://img.shields.io/badge/UUPS-Upgradeable-brightgreen.svg)
 
-**EDENA Token V2** is a next-generation ERC20 token that implements advanced lock-up systems and UUPS (Universal Upgradeable Proxy Standard) upgrade patterns. It provides efficient gas usage, comprehensive governance features, and future extensibility.
+**EDENA Token V2** is a next-generation ERC20 token that implements advanced lock-up systems and UUPS (Universal Upgradeable Proxy Standard) upgrade patterns. Optimized for Ethereum mainnet deployment, it provides efficient gas usage, comprehensive governance features, and future extensibility.
 
 ## Project Overview
 
@@ -29,7 +29,7 @@ EDENA V2 is an advanced smart contract designed to overcome the limitations of e
 | Standard         | ERC20Upgradeable |
 | Decimals         | 18               |
 | Upgrade Pattern  | UUPS             |
-| Network          | Polygon          |
+| Network          | Ethereum         |
 | License          | MIT              |
 
 ## Architecture
@@ -73,12 +73,15 @@ mapping(address => LockInfo[]) public timelockList;
 mapping(address => uint256) public lockedAmount;  // Gas optimization
 ```
 
-#### 3. Snapshot System
+#### 3. Batch Snapshot System
 
 ```solidity
 mapping(uint256 => uint256) public snapshotTotalSupply;
 mapping(uint256 => mapping(address => uint256)) public snapshotBalances;
 mapping(uint256 => address[]) public snapshotAddresses;
+mapping(uint256 => bool) public snapshotCompleted;
+mapping(uint256 => bool) public snapshotProcessing;
+uint256 public defaultBatchSize;
 ```
 
 ## Main Features
@@ -87,10 +90,11 @@ mapping(uint256 => address[]) public snapshotAddresses;
 
 #### Lock Creation
 
-- `lock()`: Direct lock setup
-- `transferWithLock()`: Transfer with simultaneous lock
+- `transferWithLock()`: Transfer with simultaneous lock (secure transfer-based locking)
 - `transferWithLockEasy()`: Simple day-based lock
 - `transferWithLockBase()`: Lock with default settings
+
+**Note**: Direct `lock()` function has been removed for security reasons.
 
 #### Lock Release
 
@@ -132,19 +136,26 @@ function _beforeTokenTransfer(address from, address to, uint256 amount) internal
 }
 ```
 
-### 3. Snapshot and Governance
+### 3. Batch Snapshot and Governance
 
-#### Snapshot Creation
+#### Batch Snapshot Creation
 
-- `snapshot()`: Create snapshot of all address balances
-- `addAddressToSnapshot()`: Add specific address to snapshot
-- `addAddressesToSnapshot()`: Batch add multiple addresses
+- `createSnapshot()`: Create batch snapshot with automatic processing
+- `processSnapshot()`: Continue batch processing with custom batch size
+- `continueSnapshot()`: Continue processing with default batch size
+- `finalizeSnapshot()`: Finalize completed snapshot to prevent modifications
+
+#### Snapshot Status Monitoring
+
+- `getSnapshotStatus()`: Get comprehensive snapshot processing status
+- `getSnapshotProgress()`: Get processing progress information
+- `isSnapshotCompleted()`: Check if snapshot processing is completed
 
 #### Snapshot Queries
 
-- `balanceOfAt()`: Query balance at specific time point
+- `balanceOfAt()`: Query balance at specific snapshot (completed snapshots only)
 - `getSnapshotTotalSupply()`: Snapshot total supply
-- `getSnapshotAddresses()`: List of addresses included in snapshot
+- `getAllSnapshotIds()`: Get all created snapshot IDs
 
 ### 4. Account Management System
 
@@ -232,10 +243,12 @@ function _removeLock(address holder, uint256 idx) internal {
 - Release all expired locks in a single transaction
 - Improved efficiency through gas cost distribution
 
-#### Multi-address Snapshot
+#### Batch Snapshot Processing
 
-- Add multiple addresses to snapshot at once
-- Minimize management costs
+- Process large address lists without gas limit issues
+- Configurable batch sizes for optimal gas usage
+- Pause/unpause mechanism for data integrity
+- Ethereum mainnet optimized gas efficiency
 
 ## Deployment and Initialization
 
@@ -294,8 +307,7 @@ function getLockSummary() public view returns (
 ### Lock Management API
 
 ```solidity
-// Lock creation
-function lock(address holder, uint256 value, uint256 releaseTime) external;
+// Lock creation (transfer-based for security)
 function transferWithLock(address holder, uint256 value, uint256 releaseTime) external;
 function transferWithLockEasy(address holder, uint256 valueEth, uint256 lockupDays) external;
 
@@ -314,14 +326,23 @@ function getLockDetails(address holder) external view returns (
 );
 ```
 
-### Snapshot API
+### Batch Snapshot API
 
 ```solidity
-// Snapshot creation
-function snapshot() external onlyOwner returns (uint256);
-function addAddressToSnapshot(address _address, uint256 snapshotId) external;
+// Batch snapshot creation
+function createSnapshot() external onlyOwner returns (uint256);
+function processSnapshot(uint256 snapshotId, uint256 batchSize) external onlyOwner returns (bool);
+function continueSnapshot(uint256 snapshotId) external onlyOwner returns (bool);
+function finalizeSnapshot(uint256 snapshotId) external onlyOwner;
 
-// Snapshot queries
+// Snapshot status monitoring
+function getSnapshotStatus(uint256 snapshotId) external view returns (
+    bool completed, uint256 processedCount, uint256 totalCount,
+    uint256 progressPercentage, bool isProcessing, bool isFinalized
+);
+function isSnapshotCompleted(uint256 snapshotId) external view returns (bool);
+
+// Snapshot queries (for completed snapshots)
 function balanceOfAt(address account, uint256 snapshotId) external view returns (uint256);
-function getSnapshotAddresses(uint256 snapshotId) external view returns (address[] memory);
+function getAllSnapshotIds() external view returns (uint256[] memory);
 ```
