@@ -8,6 +8,23 @@
 
 **EDENA Token V2** is a next-generation ERC20 token that implements advanced lock-up systems and UUPS (Universal Upgradeable Proxy Standard) upgrade patterns. Optimized for Ethereum mainnet deployment, it provides efficient gas usage, comprehensive governance features, and future extensibility.
 
+## 🔒 Security & Audit
+
+EDENA Token V2 has been verified through multiple audits by professional security firms.
+
+### Security Features
+
+- **Reentrancy Protection**: Reentrancy attack prevention
+- **Access Control**: Enhanced privilege management
+- **Input Validation**: Comprehensive input validation
+- **Emergency Pause**: Emergency response function
+
+### Audit Reports
+
+- [Final Audit Report](EdenaToken_AuditReport_InterFi.pdf) 📄
+
+---
+
 ## Project Overview
 
 EDENA V2 is an advanced smart contract designed to overcome the limitations of existing lock-up tokens and to integrate with exchange listings and DeFi ecosystems.
